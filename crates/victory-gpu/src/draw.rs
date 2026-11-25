@@ -209,13 +209,29 @@ fn windows() -> bool {
 /// barrier, a pipeline sync) or draws: what a dispatch writes is not there
 /// for a later command without a wait, and dispatches the title runs side
 /// by side are not held up by waits of ours.
+///
+/// `turns`: as `2` for twenty seconds, then off for twenty, by turns, each
+/// change said in the log (to compare the two in one run).
 fn batches() -> u8 {
+    /// 0 off, 1, 2, or 3: 2 by turns.
     static ON: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     let on = *ON.get_or_init(|| match std::env::var("VICTORY_INDIRECT_BATCH").as_deref() {
         Ok("1") => 1,
         Ok("2") => 2,
+        Ok("turns") => 3,
         _ => 0,
     });
+    let on = if on == 3 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+        let turn = START.get_or_init(std::time::Instant::now).elapsed().as_secs() / 20;
+        if LAST.swap(turn, std::sync::atomic::Ordering::Relaxed) != turn {
+            tracing::info!(on = turn % 2 == 0, "indirect records clamped in batches, by turns");
+        }
+        if turn % 2 == 0 { 2 } else { 0 }
+    } else {
+        on
+    };
     if on > 0 && crate::drvwatch::tripped() { 0 } else { on }
 }
 
