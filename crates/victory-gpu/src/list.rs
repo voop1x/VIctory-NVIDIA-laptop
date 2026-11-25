@@ -745,6 +745,12 @@ const UAV_BARRIER: Barrier = Barrier {
 
 /// Returns the console's barrier "actions" (none).
 extern "system" fn barrier(this: This, count: u32, barriers: *const Barrier) -> u32 {
+    // (Arguments may be what earlier shaders wrote from here on:
+    // `State::synced`.)
+    #[cfg(windows)]
+    if count > 0 {
+        with_state(this, |_, state| state.synced());
+    }
     #[cfg(windows)]
     if let Some(list) = host_list(this)
         && !barriers.is_null()
@@ -822,6 +828,8 @@ extern "system" fn copy_buffer_region(
     len: u64,
 ) {
     #[cfg(windows)]
+    with_state(this, |_, state| state.copied());
+    #[cfg(windows)]
     if let Some(list) = host_list(this)
         && let Some(to) = buffer_range(dst, dst_offset, len)
         && let Some(from) = buffer_range(src, src_offset, len)
@@ -853,6 +861,8 @@ fn unlike(dst: This, src: This) -> bool {
 pub(crate) static SELF_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 extern "system" fn copy_resource(this: This, dst: This, src: This) {
+    #[cfg(windows)]
+    with_state(this, |_, state| state.copied());
     #[cfg(windows)]
     {
         let Some(list) = host_list(this) else {
@@ -943,6 +953,8 @@ extern "system" fn copy_texture_region(
     src: *const CopyLocation,
     source_box: *const [u32; 6],
 ) {
+    #[cfg(windows)]
+    with_state(this, |_, state| state.copied());
     #[cfg(windows)]
     {
         use windows::Win32::Graphics::Direct3D12::{D3D12_BOX, D3D12_TEXTURE_COPY_LOCATION};
@@ -1351,6 +1363,8 @@ extern "system" fn clear_dsv(
 /// are title memory, copied at submission like buffer copies (if mapped).
 extern "system" fn copy_memory(this: This, dst: u64, src: u64, len: u64, _flags: u32) {
     #[cfg(windows)]
+    with_state(this, |_, state| state.copied());
+    #[cfg(windows)]
     if let Some(list) = host_list(this)
         && dst != 0
         && src != 0
@@ -1406,6 +1420,8 @@ extern "system" fn resolve_queries(
     buffer: This,
     offset: u64,
 ) {
+    #[cfg(windows)]
+    with_state(this, |_, state| state.copied());
     const OCCLUSION: u32 = 0;
     const BINARY: u32 = 1;
     const TIMESTAMP: u32 = 2;
@@ -1457,7 +1473,12 @@ extern "system" fn set_pipeline(this: This, pipeline: This) {
 /// bottom of the pipe `(flags, control, address, size)`. Host lists order
 /// their own work and every submission is waited for, so there is nothing
 /// to do.
-extern "system" fn sync(_: This, _flags: u32, _control: u32, _address: u64, _size: u64) {}
+extern "system" fn sync(this: This, _flags: u32, _control: u32, _address: u64, _size: u64) {
+    // (Arguments may be what earlier shaders wrote from here on:
+    // `State::synced`.)
+    #[cfg(windows)]
+    with_state(this, |_, state| state.synced());
+}
 
 /// Reset with console flags `(allocator, pipeline, flags)`; the flags only
 /// tune the console's command memory.
@@ -1991,6 +2012,10 @@ extern "system" fn wait_value64(this: This, address: u64, comparison: u32, refer
 /// first, so only their ordering matters: one barrier on every shader
 /// write (the title's buffer barriers order compute passes).
 extern "system" fn barrier_groups(this: This, count: u32, _groups: *const u8) {
+    #[cfg(windows)]
+    if count > 0 {
+        with_state(this, |_, state| state.synced());
+    }
     // Diagnostics: counted, and left out under `VICTORY_BARRIER_TEST=groups`.
     #[cfg(all(windows, feature = "diagnostics"))]
     if count > 0 {

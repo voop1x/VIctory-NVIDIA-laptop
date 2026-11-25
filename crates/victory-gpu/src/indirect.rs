@@ -36,6 +36,8 @@ use windows::core::s;
 
 use crate::host::{HostList, host, transition};
 
+pub(crate) mod batch;
+
 const SOURCE: &str = r#"
 #define RS "RootConstants(num32BitConstants=6, b0), SRV(t0), SRV(t1), UAV(u0), UAV(u1)"
 cbuffer Record : register(b0) {
@@ -372,6 +374,61 @@ pub(crate) fn bound_ahead(
     let bytes = validate_layout(spec, src.1, None)?;
     let (c, budget, dst) = (clamp()?, list.budget()?, list.indirect_scratch(bytes)?);
     clamp_into(list, c, &dst, budget, src, None, spec, true).then_some(dst)
+}
+
+/// The batched clamp's pipeline ([`batch`]).
+fn batch_clamp() -> Option<&'static Clamp> {
+    static CLAMP: std::sync::OnceLock<Option<Clamp>> = std::sync::OnceLock::new();
+    CLAMP
+        .get_or_init(|| {
+            let made = host().ok_or_else(windows::core::Error::empty).and_then(|h| make_from(&h.device, batch::SOURCE));
+            match made {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!(error = %e, "no batched argument clamp: records are clamped one at a time");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+/// Opens a batch in `list` ([`batch`]; from VIctory-7900XTX): a pass that
+/// clamps the records of the executions recorded after it, of `source` (a
+/// host copy's number and buffer) and of the `recent` ones after it. The
+/// table to add them to, and the scratch buffer its places are in.
+/// Replaces the list's compute root signature and pipeline (callers bind
+/// theirs after). `None` if the clamp is not available.
+pub(crate) fn open_batch(
+    list: &HostList,
+    source: (u64, &ID3D12Resource),
+    recent: &[(u64, ID3D12Resource)],
+) -> Option<(batch::Table, ID3D12Resource)> {
+    let c = batch_clamp()?;
+    let budget = list.budget()?;
+    let (jobs, at) = list.scratch(batch::TABLE)?;
+    let (dst, base, before) = list.batch_place()?;
+    let gpu = |b: &ID3D12Resource| {
+        // SAFETY: a live buffer.
+        Some(unsafe { b.GetGPUVirtualAddress() }).filter(|at| at.is_multiple_of(4))
+    };
+    // A source there is none of is the first again, which no job names.
+    let mut ids = [0u64; batch::SOURCES];
+    let mut sources = [gpu(source.1)?; batch::SOURCES];
+    ids[0] = source.0;
+    let others = recent.iter().filter(|r| r.0 != source.0).take(batch::SOURCES - 1);
+    for (i, (id, buffer)) in others.enumerate() {
+        if let Some(at) = gpu(buffer) {
+            // Bound, and read only if a job names it: kept alive like the
+            // copies draws read (`Shadow::refresh`).
+            list.keep(buffer);
+            (ids[i + 1], sources[i + 1]) = (*id, at);
+        }
+    }
+    batch::record(c, &list.list, (&dst, before), budget, sources, jobs);
+    // SAFETY: the list's own upload memory of that many bytes, 256-byte
+    // aligned, until it is reset.
+    Some((unsafe { batch::Table::new(at, base, ids) }, dst))
 }
 
 /// [`record_clamp_as`] into `list`'s scratch buffer `dst`, from the state
@@ -937,6 +994,175 @@ void main() {
     hits.InterlockedAdd(0, 1, prev);
 }
 "#;
+
+    /// What a batch's table says of records added to it: one job per
+    /// record, charged for every execution that reads it, and none for what
+    /// the pass cannot read.
+    #[test]
+    fn batch_tables() {
+        use batch::{JOBS, SLOT, TABLE, TIMES, Table, job};
+        let mut memory = vec![0xffff_ffffu32; TABLE as usize / 4 + 1];
+        // SAFETY: the vector holds the table and outlives its use.
+        let mut t = unsafe { Table::new(memory.as_mut_ptr().cast(), 4096, [7, 9, 0, 0]) };
+        assert_eq!(t.place(7, 64, 10), Some(4096));
+        assert_eq!(t.place(9, 64, 10), Some(4096 + u64::from(SLOT)));
+        assert_eq!(t.place(7, 64, 2), Some(4096 + 2 * u64::from(SLOT)), "another kind is another record");
+        // The same record again: the same place, charged twice.
+        assert_eq!(t.place(9, 64, 10), Some(4096 + u64::from(SLOT)));
+        assert_eq!(&memory[..4], [3, 0xffff_ffff, 0xffff_ffff, 0xffff_ffff]);
+        assert_eq!(memory[4..8], [job(0, 10, 1), 64, 4096, 0]);
+        assert_eq!(memory[8..12], [job(1, 10, 2), 64, 4096 + SLOT, 0]);
+        assert_eq!(job(1, 10, 2), 1 | 10 << 4 | 3 << 8 | 2 << 16);
+        // Not a copy of the pass, not on 4 bytes, past 32 bits, not a kind.
+        for (id, offset, kind) in [(8, 64, 10), (7, 66, 10), (7, 1 << 32, 10), (7, u64::from(u32::MAX) & !3, 10), (7, 64, 3)] {
+            assert_eq!(t.place(id, offset, kind), None);
+        }
+        // Read more often than one job may be charged for: another job.
+        for _ in 1..TIMES {
+            assert_eq!(t.place(7, 64, 10), Some(4096));
+        }
+        assert_eq!(t.place(7, 64, 10), Some(4096 + 3 * u64::from(SLOT)));
+        assert_eq!(t.place(7, 64, 10), Some(4096 + 3 * u64::from(SLOT)));
+        for i in 4..u64::from(JOBS) {
+            assert_eq!(t.place(7, 1024 + 16 * i, 0), Some(4096 + i * u64::from(SLOT)));
+        }
+        assert_eq!(t.place(7, 1024, 1), None, "full");
+        assert_eq!(t.place(7, 1024 + 16 * 5, 0), Some(4096 + 5 * u64::from(SLOT)));
+        assert_eq!((memory[0], memory[TABLE as usize / 4]), (JOBS, 0xffff_ffff));
+    }
+
+    /// A batch clamps records exactly as the clamp of one execution does, of
+    /// any kind, sensible or not; they are added to its table after the pass
+    /// was recorded; it charges each as often as it is read.
+    #[test]
+    fn warp_batch_clamps_as_the_clamp_of_one_does() {
+        let Some(mut warp) = WarpHarness::new() else {
+            return;
+        };
+        let pass = make_from(&warp.device, batch::SOURCE).expect("the batched clamp must compile on WARP");
+        let kinds = [0u32, 1, 2, 10];
+        let values = [0u32, 1, 3, 100, 65_535, 65_536, 1 << 20, (1 << 23) - 1, 1 << 23, 1 << 24, (1 << 26) + 1, u32::MAX];
+        // Every kind with many records, in two sources.
+        let mut records: Vec<(u32, [u32; 5])> = Vec::new();
+        for kind in kinds {
+            for (i, a) in values.into_iter().enumerate() {
+                for (k, b) in values.into_iter().enumerate() {
+                    records.push((kind, [a, b, values[(i * 3 + k) % 4], 77, 0xABCD]));
+                }
+            }
+        }
+        // In passes of so few that the budget holds whatever one asks for,
+        // and one pass of them all, which it does not.
+        let (src, src_ptr, src_gpu) = warp.shared_buffer(64 << 10);
+        let (_other, other_ptr, other_gpu) = warp.shared_buffer(64 << 10);
+        for (i, (_, words)) in records.iter().enumerate() {
+            for (w, word) in words.iter().enumerate() {
+                // SAFETY: 400 records of 32 bytes in 64 KiB.
+                unsafe {
+                    src_ptr.cast::<u32>().add(i * 8 + w).write_volatile(*word);
+                    other_ptr.cast::<u32>().add(i * 8 + w).write_volatile(*word);
+                }
+            }
+        }
+        let (_budget, budget_ptr, budget_gpu) = warp.shared_buffer(256);
+        let (back, back_ptr, _) = warp.shared_buffer(64 << 10);
+        let dst = warp.default_uav(64 << 10);
+        let (_table, table_ptr, table_gpu) = warp.shared_buffer(batch::TABLE);
+        for (i, (kind, _)) in records.iter().enumerate().step_by(3) {
+            let offset = i as u64 * 32;
+            let words = batch::words(*kind).unwrap();
+            let stride = words * 4;
+            let read = |p: *mut u8| -> Vec<u32> {
+                // SAFETY: the mapping holds more.
+                (0..words as usize).map(|w| unsafe { p.cast::<u32>().add(w).read_volatile() }).collect()
+            };
+            let mut seen = Vec::new();
+            for batched in [false, true] {
+                // SAFETY: mapped buffers; nothing runs.
+                unsafe { std::ptr::write_bytes(budget_ptr, 0, 256) };
+                if batched {
+                    batch::record(&pass, &warp.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu, other_gpu, src_gpu, src_gpu], table_gpu);
+                    // SAFETY: the mapped table; the list has not run.
+                    let mut table = unsafe { batch::Table::new(table_ptr, 0, [1, 2, 0, 0]) };
+                    assert_eq!(table.place(1 + i as u64 % 2, offset, *kind), Some(0));
+                } else {
+                    assert!(record_clamp_as(
+                        &warp.clamp,
+                        &warp.list,
+                        (&dst, D3D12_RESOURCE_STATE_COMMON),
+                        budget_gpu,
+                        (&src, offset),
+                        None,
+                        (*kind, stride, 1),
+                        false,
+                    ));
+                }
+                // SAFETY: an open list; the records are readable as arguments.
+                unsafe {
+                    warp.list.ResourceBarrier(&[transition(&dst, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                    warp.list.CopyBufferRegion(&back, 0, &dst, 0, u64::from(stride));
+                    warp.list.ResourceBarrier(&[transition(&dst, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON)]);
+                }
+                warp.submit_and_wait();
+                // SAFETY: the list has run; mapped words.
+                let budget: Vec<u32> = (0..3).map(|k| unsafe { budget_ptr.cast::<u32>().add(k).read_volatile() }).collect();
+                seen.push((read(back_ptr), budget));
+            }
+            // (A mesh record that asks for nothing notes nothing.)
+            assert_eq!(seen[0], seen[1], "record {i} of kind {kind}: {:?}", records[i].1);
+        }
+    }
+
+    /// Records past the list's budget come out empty, and one read by many
+    /// executions is charged for each.
+    #[test]
+    fn warp_batch_charges_every_execution() {
+        let Some(mut warp) = WarpHarness::new() else {
+            return;
+        };
+        let pass = make_from(&warp.device, batch::SOURCE).expect("the batched clamp must compile on WARP");
+        const BUDGET: u32 = 1 << 27;
+        // 2^26 vertices each, as much as a draw is let run: two fill it.
+        for (times, records, filled) in [(1u32, 3u64, 2usize), (2, 1, 1), (1, 1, 1), (3, 1, 0)] {
+            let (_src, src_ptr, src_gpu) = warp.shared_buffer(64 << 10);
+            let (_budget, budget_ptr, budget_gpu) = warp.shared_buffer(256);
+            let (back, back_ptr, _) = warp.shared_buffer(1024);
+            let (_table, table_ptr, table_gpu) = warp.shared_buffer(batch::TABLE);
+            let dst = warp.default_uav(64 << 10);
+            batch::record(&pass, &warp.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu; 4], table_gpu);
+            // SAFETY: mapped buffers, which the list has not read yet.
+            let mut table = unsafe {
+                std::ptr::write_bytes(budget_ptr, 0, 256);
+                for r in 0..records {
+                    for (w, word) in [1u32 << 22, 16, 5, 6].into_iter().enumerate() {
+                        src_ptr.cast::<u32>().add(r as usize * 4 + w).write_volatile(word);
+                    }
+                }
+                batch::Table::new(table_ptr, 0, [1, 0, 0, 0])
+            };
+            for _ in 0..times {
+                for r in 0..records {
+                    assert_eq!(table.place(1, r * 16, 0), Some(r * u64::from(batch::SLOT)));
+                }
+            }
+            // SAFETY: an open list; the records are readable as arguments.
+            unsafe {
+                warp.list.ResourceBarrier(&[transition(&dst, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                warp.list.CopyBufferRegion(&back, 0, &dst, 0, 256);
+            }
+            warp.submit_and_wait();
+            // SAFETY: the list has run; mapped words.
+            let (spent, out): (u32, Vec<u32>) = unsafe {
+                (
+                    budget_ptr.cast::<u32>().read_volatile(),
+                    (0..records as usize).map(|r| back_ptr.cast::<u32>().add(r * batch::SLOT as usize / 4).read_volatile()).collect(),
+                )
+            };
+            assert_eq!(out.iter().filter(|&&v| v == 1 << 22).count(), filled, "{times} times {records}: {out:?}");
+            assert!(out.iter().all(|&v| v == 0 || v == 1 << 22));
+            assert_eq!(spent, BUDGET.min((1 << 26) * times * records as u32));
+        }
+    }
 
     struct WarpHarness {
         device: ID3D12Device,
