@@ -22,6 +22,8 @@ if (-not $Safe) {
         VICTORY_CARD_REHASH_RUNS = '1'
         # also in VIctory-7900XTX's set
         VICTORY_RELAY = '2'; VICTORY_WIDE_BACK = '1'; VICTORY_JOIN_COPIES = '1'
+        # ported from VIctory-7900XTX: about 13 % shorter frames in the world (run-batch, by turns)
+        VICTORY_INDIRECT_BATCH = '2'
     }
 }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
