@@ -33,6 +33,63 @@ pub(crate) struct Pending {
     /// whether a draw or dispatch has requested it yet.
     key: String,
     used: AtomicBool,
+    /// A confirmed first-scene or bake producer ([`scene_input`]), started
+    /// at its creation even on a cold cache.
+    scene_input: bool,
+    /// Why this pipeline is left out on purpose ([`left_out`]).
+    left_out: Option<&'static str>,
+}
+
+/// Whether one of `shaders` is a compute program whose container names `name`.
+fn named(shaders: &[Arc<Shader>], name: &[u8]) -> bool {
+    shaders
+        .iter()
+        .any(|s| s.stage == "compute" && s.container.windows(name.len()).any(|w| w == name))
+}
+
+/// The ray-tracing resolve and ray activation programs, left out when the
+/// structure builder is off and `VICTORY_RT_RESOLVE=0` asks for it: without
+/// structures they shade no hits, and some 1,000 of them clog a cold
+/// compile queue. Off by default here (cool_fox leaves them out by default):
+/// not yet checked that the picture loses nothing in this tree. From
+/// cool_fox 8cc31ab (codec_d).
+fn left_out(shaders: &[Arc<Shader>]) -> Option<&'static str> {
+    static SKIP: OnceLock<bool> = OnceLock::new();
+    let skip = *SKIP.get_or_init(|| {
+        let builder = std::env::var_os("VICTORY_BVH_BUILDER").is_some_and(|v| v == "1");
+        let skip = !builder && std::env::var_os("VICTORY_RT_RESOLVE").is_some_and(|v| v == "0");
+        if skip {
+            tracing::info!("ray-tracing resolve and ray activation programs left out (VICTORY_RT_RESOLVE=0)");
+        }
+        skip
+    });
+    if !skip {
+        return None;
+    }
+    if named(shaders, b"CS_RaytracingResolve") {
+        return Some("shades ray-tracing hits without structures, left out");
+    }
+    if named(shaders, b"CS_ScreenProbes_ActivateRays") {
+        return Some("ray activation without structures, left out");
+    }
+    None
+}
+
+/// Confirmed first-scene producers (cutscene lighting, tiling) and the
+/// decoration bake: made at their creation even on a cold cache, so they do
+/// not miss their first frame. From cool_fox 8cc31ab (codec_d).
+fn scene_input(shaders: &[Arc<Shader>]) -> bool {
+    shaders.iter().any(|s| {
+        matches!(
+            s.hash.as_str(),
+            "970c4fbb3b017c0e"
+                | "068c90badc86f1fd"
+                | "e4a7e088c7780ce8"
+                | "ebe4e53f031f5249"
+                | "2cc4c197ee29e291"
+                | "369cbe906ea72764"
+        ) || crate::draw::BAKE_PIXEL_SHADERS.contains(&s.hash.as_str())
+    })
 }
 
 // SAFETY: D3D12 objects are free-threaded; the graphics state (whose input
@@ -49,7 +106,11 @@ impl Pending {
             key.update(s.hash.as_bytes());
         }
         key.update(graphics.as_ref().map(|g| g.describe()).unwrap_or_default().as_bytes());
+        let scene_input = scene_input(&shaders);
+        let left_out = left_out(&shaders);
         Pending {
+            scene_input,
+            left_out,
             shaders,
             graphics,
             queue_state: AtomicU8::new(NOT_QUEUED),
@@ -118,6 +179,9 @@ pub(crate) fn waiting() -> u64 {
 /// The host pipeline if it is made (or is made within the frame's budget);
 /// queues it on first use.
 pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
+    if p.left_out.is_some() {
+        return None;
+    }
     // A still-pending pipeline was requested by the title too. Prewarm it
     // on the next launch, even if this run never got to use it.
     if !p.used.load(Ordering::Relaxed) && !p.used.swap(true, Ordering::Relaxed) {
@@ -133,16 +197,23 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
 /// Makes `p` on this thread if it is not made yet (waiting for a worker
 /// that is making it); whether it has a host pipeline.
 pub(crate) fn now(p: &Arc<Pending>) -> bool {
+    if p.left_out.is_some() {
+        return false;
+    }
     p.make();
     p.made.get().is_some_and(|made| made.is_some())
 }
 
 /// At the title's creation of a pipeline: starts it at once if an earlier
-/// run drew with it (during loading, so the world's first frames find it).
+/// run drew with it (during loading, so the world's first frames find it),
+/// or if it is a confirmed first-scene or bake producer ([`scene_input`]).
 pub(crate) fn early(p: &Arc<Pending>) {
-    if !p.shaders.is_empty() && super::library::wanted_early(&p.key) {
+    if p.left_out.is_some() {
+        return;
+    }
+    if !p.shaders.is_empty() && (p.scene_input || super::library::wanted_early(&p.key)) {
         super::library::EARLY.fetch_add(1, Ordering::Relaxed);
-        start(p, EARLY);
+        start(p, if p.scene_input { REQUESTED } else { EARLY });
     }
 }
 
