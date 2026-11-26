@@ -1442,14 +1442,23 @@ fn second_plane(planes: u32, plane_parameters: *const Plane, first: This) -> Opt
     if !on || planes < 2 || plane_parameters.is_null() {
         return None;
     }
-    // SAFETY: the title passes `planes` descriptions of `STRIDE` bytes.
-    let plane = unsafe { plane_parameters.cast::<u8>().add(STRIDE).cast::<Plane>().as_ref() }?;
-    if plane.count == 0 || plane.resources.is_null() {
+    // The second description's prefix and its first resource are read with
+    // `read_into`, and the resource must be one of ours: a caller with
+    // another layout then shows its first plane alone instead of faulting
+    // (cool_fox 1ad6e67, codec_d).
+    let second = plane_parameters.cast::<u8>().wrapping_add(STRIDE);
+    let mut prefix = [0; size_of::<Plane>()];
+    if !crate::host::read_into(second, &mut prefix) {
         return None;
     }
-    // SAFETY: the plane lists `count` resources.
-    let resource = unsafe { *plane.resources };
-    if resource == first {
+    // SAFETY: the prefix has `Plane`'s C layout and its bytes were copied.
+    let plane = unsafe { prefix.as_ptr().cast::<Plane>().read_unaligned() };
+    let mut pointer = [0; size_of::<This>()];
+    if plane.count == 0 || plane.resources.is_null() || !crate::host::read_into(plane.resources.cast(), &mut pointer) {
+        return None;
+    }
+    let resource = usize::from_ne_bytes(pointer) as This;
+    if resource == first || !crate::resource::is_resource(resource) {
         return None;
     }
     let copy = crate::resource::host_copy(resource)?;
