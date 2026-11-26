@@ -17,6 +17,9 @@ pub struct FourCC(pub [u8; 4]);
 
 impl FourCC {
     pub const DXIL: FourCC = FourCC(*b"DXIL");
+    /// A compute program in place of `DXIL` (VIctory-7900XTX). Only named
+    /// here for `emit`'s driver-loop test; this tree does not read such parts.
+    pub const ACCC: FourCC = FourCC(*b"ACCC");
     pub const STAT: FourCC = FourCC(*b"STAT");
     pub const RTS0: FourCC = FourCC(*b"RTS0");
     pub const PSV0: FourCC = FourCC(*b"PSV0");
