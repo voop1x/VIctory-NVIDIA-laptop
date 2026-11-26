@@ -24,6 +24,10 @@
 #[cfg(windows)]
 mod console_insn;
 mod crash;
+// From trustno1-coder/VIctory-NVIDIA afd84de (victory-perf, from ZigZagBoi1/ScarlettPort):
+// VICTORY_RENDER_SCALE / VICTORY_OWN_UPSCALER / VICTORY_NO_WATCHDOG title patches.
+#[cfg(windows)]
+mod hooks;
 pub mod prepare;
 pub mod resolve;
 #[cfg(all(windows, feature = "diagnostics"))]
