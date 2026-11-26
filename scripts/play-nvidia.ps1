@@ -42,6 +42,10 @@ $settings = @{
     # A thread remembers what its asks for a buffer's host copy found (shadow.rs; fxceless
     # 32be36d, measured there about 14 ms a frame).
     VICTORY_LOOKUP_CACHE = '1'
+    # Textures picked by index are uploaded by a thread of their own (heap_worker.rs; fxceless
+    # d4a528b, fork pull request #1007: 6.2-6.7 -> 8.6-9.5 fps there). Needs late wait, which
+    # VICTORY_RELAY above turns on.
+    VICTORY_HEAP_WORKER = '1'
 }
 $SeriesS = -not $SeriesX
 if ($SeriesS) {
