@@ -220,6 +220,35 @@ pub extern "system" fn OutputDebugStringA(text: *const u8) {
     }
 }
 
+/// The user's locale name, which the title takes its language (text and
+/// subtitles) from: `VICTORY_LOCALE` (a name such as `ru-RU`) if set, else
+/// the host's own answer. Returns the characters written, the terminating
+/// zero included, or 0 (with `ERROR_INSUFFICIENT_BUFFER`) when it does not fit.
+pub extern "system" fn GetUserDefaultLocaleName(name: *mut u16, size: i32) -> i32 {
+    static LOCALE: std::sync::OnceLock<Option<Vec<u16>>> = std::sync::OnceLock::new();
+    let asked = LOCALE.get_or_init(|| {
+        let locale = std::env::var("VICTORY_LOCALE").ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())?;
+        tracing::info!(%locale, "the title is told the user's locale (VICTORY_LOCALE)");
+        Some(locale.encode_utf16().chain(std::iter::once(0)).collect())
+    });
+    let Some(locale) = asked else {
+        type Host = unsafe extern "system" fn(*mut u16, i32) -> i32;
+        return match crate::host::function("kernel32.dll", "GetUserDefaultLocaleName") {
+            // SAFETY: the host's own function, with the title's arguments.
+            Some(f) => unsafe { std::mem::transmute::<usize, Host>(f)(name, size) },
+            None => 0,
+        };
+    };
+    if name.is_null() || size < locale.len() as i32 {
+        const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+        host::set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    // SAFETY: the title's buffer holds `size` characters, checked above.
+    unsafe { name.copy_from_nonoverlapping(locale.as_ptr(), locale.len()) };
+    locale.len() as i32
+}
+
 /// See [`OutputDebugStringA`].
 pub extern "system" fn OutputDebugStringW(text: *const u16) {
     if !text.is_null() {
@@ -361,8 +390,12 @@ pub(crate) fn module() -> HleModule {
             "api-ms-win-core-debug-*",
             "api-ms-win-core-errorhandling-*",
             "api-ms-win-crt-runtime-*",
+            // Only `GetUserDefaultLocaleName` is ours; the rest of the set
+            // stays the host's.
+            "api-ms-win-core-localization-*",
         ],
         exports: vec![
+            hle_export!(GetUserDefaultLocaleName),
             hle_export!(GetModuleHandleW),
             hle_export!(GetModuleHandleA),
             hle_export!(GetModuleFileNameW),
