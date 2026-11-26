@@ -1967,7 +1967,7 @@ struct Deferred {
     /// submits the list.
     kept: Vec<windows::core::IUnknown>,
     /// The pipelines [`HostList::bind_pipeline`] kept, by address.
-    bound: std::collections::HashSet<usize, std::hash::BuildHasherDefault<AddressHash>>,
+    bound: std::collections::HashSet<usize>,
     /// Buffer ranges refreshed since the last title copy (host copy,
     /// address, bytes): refreshing them again would find the same bytes.
     refreshed: std::collections::HashSet<(usize, usize, usize)>,
