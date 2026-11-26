@@ -39,6 +39,9 @@ $settings = @{
     VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1536'
     # Series S presents the interface as a second plane, laid over the game (compose.rs).
     VICTORY_COMPOSE = '1'
+    # A thread remembers what its asks for a buffer's host copy found (shadow.rs; fxceless
+    # 32be36d, measured there about 14 ms a frame).
+    VICTORY_LOOKUP_CACHE = '1'
 }
 $SeriesS = -not $SeriesX
 if ($SeriesS) {
