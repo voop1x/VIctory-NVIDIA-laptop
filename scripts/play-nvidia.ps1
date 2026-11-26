@@ -1,13 +1,14 @@
 # Starts the title on an NVIDIA card with the Series S settings of trustno1-coder/VIctory-NVIDIA
 # (scripts/play-nvidia.ps1 there, measured on an RTX 5070: about 20-22 fps in the prologue), with
 # this fork's own fast set (scripts\play.ps1). Their settings for code this fork does not have
-# (VICTORY_THIN, CARD_STEPS, SHOW_AFTER, AMBIENT, DYNAMIC_SLOTS ...) are left out.
+# (VICTORY_THIN, CARD_STEPS, SHOW_AFTER, AMBIENT, DYNAMIC_SLOTS ...) are left out, and so is
+# VICTORY_BVH_MISS (it takes the bounced light away; the switch is not in this tree).
 #   scripts\play-nvidia.ps1 -Exe <path of your own copy's executable>
 # -NoSmoothMotion  run target\<build>\victory.exe itself. By default a copy named victory_sm.exe is
 #                  started, so a Smooth Motion profile set for that exe in the NVIDIA App applies.
 # -SeriesX         the Series X profile instead (slower)
 # -Log             where the log goes (default: the console)
-# -More            other settings: -More @{VICTORY_BVH_MISS='0'}
+# -More            other settings: -More @{VICTORY_RENDER_SCALE='1'}
 param(
     [Parameter(Mandatory)][string]$Exe,
     [switch]$NoSmoothMotion,
@@ -29,8 +30,6 @@ $settings = @{
     VICTORY_PIPELINE_WAIT_MS = '10000'
     # half render scale with the title's own upscaler (victory-loader hooks.rs);
     VICTORY_RENDER_SCALE = '0.5'; VICTORY_OWN_UPSCALER = '1'
-    # ray walks end at the root while the structure builder is off (some dim rooms darker);
-    VICTORY_BVH_MISS = '1'
     # memory compares on the card instead of the CPU;
     VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1536'
     # Series S presents the interface as a second plane, laid over the game (compose.rs).
