@@ -6,10 +6,11 @@
 #   scripts\play-nvidia.ps1 -Exe <path of your own copy's executable>
 # -NoSmoothMotion  run target\<build>\victory.exe itself. By default a copy named victory_sm.exe is
 #                  started, so a Smooth Motion profile set for that exe in the NVIDIA App applies.
-# Default: full quality, the Series X profile at the title's own render resolution (no downscale).
-# -SeriesS         the faster Series S profile at half render scale with the title's own upscaler
-#                  (textures can be missing or late there)
-# -SeriesX         accepted for older command lines; Series X is the default now
+# Default: the Series S profile at half render scale (0.5) with the title's own upscaler, the
+#                  fastest set (textures can be missing or late there).
+# -SeriesX         full quality instead: the Series X profile at the title's own render resolution
+#                  (about half the frame rate).
+# -SeriesS         accepted for older command lines; Series S at 0.5 is the default
 # -Log             where the log goes (default: the console)
 # -More            other settings: -More @{VICTORY_RENDER_SCALE='0.75'}
 param(
@@ -39,6 +40,7 @@ $settings = @{
     # Series S presents the interface as a second plane, laid over the game (compose.rs).
     VICTORY_COMPOSE = '1'
 }
+$SeriesS = -not $SeriesX
 if ($SeriesS) {
     # half render scale with the title's own upscaler (victory-loader hooks.rs).
     $settings.VICTORY_RENDER_SCALE = '0.5'; $settings.VICTORY_OWN_UPSCALER = '1'
