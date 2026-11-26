@@ -26,6 +26,10 @@ mod renderdoc;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod shot;
 pub mod console;
+// Series S interface plane laid over the game (VICTORY_COMPOSE=1; trustno1-coder/VIctory-NVIDIA
+// 7997a20, a port of fxceless pull request 1189 by Tissma95).
+#[cfg(windows)]
+mod compose;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod copystat;
 pub mod descriptor;

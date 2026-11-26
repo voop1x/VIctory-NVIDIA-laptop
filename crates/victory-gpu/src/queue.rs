@@ -154,6 +154,11 @@ fn send_behind(this: This, planes: u32, plane_parameters: *const Plane) -> bool 
     }
     // SAFETY: the plane lists `count` resources.
     let resource = unsafe { *plane.resources };
+    // A second plane to lay over this one (`second_plane`) is shown the
+    // old way, where it is laid over.
+    if second_plane(planes, plane_parameters, resource).is_some() {
+        return false;
+    }
     let Some(texture) = crate::resource::host_resource(resource) else {
         return false;
     };
@@ -1404,7 +1409,8 @@ fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESU
         const COPY_SOURCE: u32 = 0x800;
         let state = crate::resource::host_transition(resource, COPY_SOURCE)
             .map_or(COPY_SOURCE, |(_, before)| before);
-        let shown = host.present(texture, state, frame);
+        let over = second_plane(planes, plane_parameters, resource);
+        let shown = host.present_over(texture, state, over.as_ref().map(|(t, s)| (&t.texture, *s)), frame);
         crate::resource::host_transition(resource, state);
         #[cfg(feature = "diagnostics")]
         blinks(frame, resource, state, shown);
@@ -1415,6 +1421,43 @@ fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESU
     let _ = (planes, plane_parameters);
     S_OK
 }
+/// A present's second plane, to be laid over the first (`crate::compose`),
+/// with `VICTORY_COMPOSE=1`: its host copy and the host state the lists
+/// recorded so far leave it in. A Series S title presents two planes: the
+/// game and the interface (menus, loading screens, the intro), 72-byte
+/// descriptions each. (trustno1-coder/VIctory-NVIDIA 7997a20, after
+/// fxceless pull request 1189 by Tissma95.)
+#[cfg(windows)]
+fn second_plane(planes: u32, plane_parameters: *const Plane, first: This) -> Option<(std::sync::Arc<crate::resource::HostTexture>, u32)> {
+    const STRIDE: usize = 72;
+    const COPY_SOURCE: u32 = 0x800;
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_COMPOSE").is_some_and(|v| v == "1");
+        if on {
+            tracing::info!("present planes: a second plane is laid over the first (VICTORY_COMPOSE=1)");
+        }
+        on
+    });
+    if !on || planes < 2 || plane_parameters.is_null() {
+        return None;
+    }
+    // SAFETY: the title passes `planes` descriptions of `STRIDE` bytes.
+    let plane = unsafe { plane_parameters.cast::<u8>().add(STRIDE).cast::<Plane>().as_ref() }?;
+    if plane.count == 0 || plane.resources.is_null() {
+        return None;
+    }
+    // SAFETY: the plane lists `count` resources.
+    let resource = unsafe { *plane.resources };
+    if resource == first {
+        return None;
+    }
+    let copy = crate::resource::host_copy(resource)?;
+    let state = crate::resource::host_transition(resource, COPY_SOURCE).map_or(COPY_SOURCE, |(_, before)| before);
+    crate::resource::host_transition(resource, state);
+    Some((copy, state))
+}
+
 /// Diagnostics: logs a presented frame that is black after one that was
 /// not, with what was presented and how many draws ran since.
 #[cfg(all(windows, feature = "diagnostics"))]
