@@ -78,6 +78,20 @@ extern "system" fn is_packaged(_: This) -> bool {
     true
 }
 
+/// The locale the package is used in (`XPackageGetUserLocale`): what the
+/// title takes its language from. `VICTORY_LOCALE` (a BCP-47 name such as
+/// `ru-RU`), else `en-US`.
+extern "system" fn user_locale(_: This, size: usize, buffer: *mut u8) -> HRESULT {
+    static LOCALE: OnceLock<String> = OnceLock::new();
+    let locale = LOCALE.get_or_init(|| {
+        let locale = std::env::var("VICTORY_LOCALE").ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+        let locale = locale.unwrap_or_else(|| "en-US".to_owned());
+        tracing::info!(%locale, "package user locale (VICTORY_LOCALE)");
+        locale
+    });
+    put_string(locale, size, buffer, std::ptr::null_mut())
+}
+
 /// Installation monitors all watch the same finished installation, so the
 /// handle is a fixed address.
 static MONITOR: u8 = 0;
@@ -280,7 +294,7 @@ static VTABLE: Methods<40> = Methods([
     missing::<8> as *const (),          // 0x40 update a monitor
     register_progress as *const (),     // 0x48
     missing::<10> as *const (),         // 0x50 unregister it
-    missing::<11> as *const (),         // 0x58 user locale
+    user_locale as *const (),           // 0x58 user locale
     find_availability as *const (),     // 0x60
     missing::<13> as *const (),         // 0x68 enumerate chunk availability
     change_order as *const (),          // 0x70
