@@ -57,6 +57,8 @@ $settings = @{
     VICTORY_TEXTURE_BACK = '1'
     # Crash tracing cheap enough to leave on: the faulting address of a removed device.
     VICTORY_D3D12_DRED = 'faults'
+    # The language the title is told (XPackageGetUserLocale): Russian text and subtitles.
+    VICTORY_LOCALE = 'ru-RU'
 }
 $SeriesS = -not $SeriesX
 if ($SeriesS) {
