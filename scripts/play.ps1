@@ -4,11 +4,15 @@
 # -Safe   the plain defaults (every switch below left out), to compare or when something is wrong
 # -Log    where the log goes (default: none, the console)
 # -More   other settings: -More @{VICTORY_FPS_COUNTER='0'}
+# -Console series-x (default) or series-s: the console model the title sees (it picks its own render settings)
+# -Display WxH: the display mode reported to the title (fxceless VICTORY_DISPLAY_MODE; unset: 3840x2160)
 param(
     [Parameter(Mandatory)][string]$Exe,
     [switch]$Safe,
     [string]$Log = '',
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
+    [ValidateSet('series-x', 'series-s')][string]$Console = 'series-x',
+    [string]$Display = '',
     [hashtable]$More = @{}
 )
 $settings = @{}
@@ -26,6 +30,7 @@ if (-not $Safe) {
         VICTORY_INDIRECT_BATCH = '2'
     }
 }
+if ($Display) { $settings.VICTORY_DISPLAY_MODE = $Display }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"
@@ -37,5 +42,5 @@ foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
 $Exe = (Resolve-Path $Exe).Path
 Push-Location (Join-Path $PSScriptRoot '..')   # victory.toml is looked for here
 try {
-    if ($Log) { & $victory run $Exe --execute *> $Log } else { & $victory run $Exe --execute }
+    if ($Log) { & $victory run $Exe --execute --console $Console *> $Log } else { & $victory run $Exe --execute --console $Console }
 } finally { Pop-Location }
