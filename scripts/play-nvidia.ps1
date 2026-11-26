@@ -6,12 +6,16 @@
 #   scripts\play-nvidia.ps1 -Exe <path of your own copy's executable>
 # -NoSmoothMotion  run target\<build>\victory.exe itself. By default a copy named victory_sm.exe is
 #                  started, so a Smooth Motion profile set for that exe in the NVIDIA App applies.
-# -SeriesX         the Series X profile instead (slower)
+# Default: full quality, the Series X profile at the title's own render resolution (no downscale).
+# -SeriesS         the faster Series S profile at half render scale with the title's own upscaler
+#                  (textures can be missing or late there)
+# -SeriesX         accepted for older command lines; Series X is the default now
 # -Log             where the log goes (default: the console)
-# -More            other settings: -More @{VICTORY_RENDER_SCALE='1'}
+# -More            other settings: -More @{VICTORY_RENDER_SCALE='0.75'}
 param(
     [Parameter(Mandatory)][string]$Exe,
     [switch]$NoSmoothMotion,
+    [switch]$SeriesS,
     [switch]$SeriesX,
     [string]$Log = '',
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
@@ -26,14 +30,18 @@ $settings = @{
     VICTORY_CARD_REHASH_RUNS = '1'; VICTORY_RELAY = '2'; VICTORY_WIDE_BACK = '1'; VICTORY_JOIN_COPIES = '1'
     VICTORY_INDIRECT_BATCH = '2'
     # From VIctory-NVIDIA's play-nvidia.ps1:
-    # wait for new shaders rather than skip their draws (a hitch the first time a place is seen);
-    VICTORY_PIPELINE_WAIT_MS = '10000'
-    # half render scale with the title's own upscaler (victory-loader hooks.rs);
-    VICTORY_RENDER_SCALE = '0.5'; VICTORY_OWN_UPSCALER = '1'
+    # do not wait for new pipelines: draws without one are skipped until it is made in the
+    # background (was '10000', which on a fresh shader cache blocked frames for seconds and Windows
+    # closed the window as not responding). -More @{VICTORY_PIPELINE_WAIT_MS='10000'} for the old way.
+    VICTORY_PIPELINE_WAIT_MS = '0'
     # memory compares on the card instead of the CPU;
     VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1536'
     # Series S presents the interface as a second plane, laid over the game (compose.rs).
     VICTORY_COMPOSE = '1'
+}
+if ($SeriesS) {
+    # half render scale with the title's own upscaler (victory-loader hooks.rs).
+    $settings.VICTORY_RENDER_SCALE = '0.5'; $settings.VICTORY_OWN_UPSCALER = '1'
 }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
@@ -52,7 +60,7 @@ Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-O
 foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
 $Exe = (Resolve-Path $Exe).Path
 $runArgs = @('run', $Exe, '--execute')
-if (-not $SeriesX) { $runArgs += @('--console', 'series-s') }
+if ($SeriesS) { $runArgs += @('--console', 'series-s') }   # Series X is victory's default
 Push-Location (Join-Path $PSScriptRoot '..')   # victory.toml is looked for here
 try {
     if ($Log) { & $victory @runArgs *> $Log } else { & $victory @runArgs }
