@@ -7280,7 +7280,14 @@ impl HostList {
                 }
                 Step::Texture(staging) => {
                     if batch.texture_due(staging) {
-                        staging.refresh();
+                        if parallel_refresh() {
+                            // Checked with the others of the batch, several
+                            // at a time, before the next step that writes
+                            // title memory ([`Batch::check_textures`]).
+                            batch.due_textures.push(staging.clone());
+                        } else {
+                            staging.refresh();
+                        }
                     }
                     continue;
                 }
@@ -7404,6 +7411,10 @@ struct Batch {
     current: std::collections::HashMap<usize, (std::sync::Arc<crate::shadow::Shadow>, usize, usize)>,
     /// Staging buffers (by address) refreshed since the last title write.
     textures: std::collections::HashSet<usize>,
+    /// With [`parallel_refresh`]: textures due a check, not checked yet
+    /// ([`Batch::check_textures`], before any write of ours and at every
+    /// flush).
+    due_textures: Vec<std::sync::Arc<crate::texture::Staging>>,
 }
 
 impl Batch {
@@ -7492,6 +7503,7 @@ impl Batch {
     /// Before a step that writes title memory: pending refreshes are done
     /// first, and textures are checked again after it.
     fn title_written(&mut self) {
+        self.check_textures();
         self.flush();
         self.textures.clear();
         // Where it writes is not known: no copy counts as up to date.
@@ -7503,6 +7515,7 @@ impl Batch {
     /// in this submission that holds some of those bytes, the larger part
     /// beside them stays so.
     fn title_wrote(&mut self, at: usize, len: usize) {
+        self.check_textures();
         self.flush();
         self.textures.clear();
         let end = at + len;
@@ -7521,7 +7534,52 @@ impl Batch {
         });
     }
 
+    /// With [`parallel_refresh`]: checks the textures due ([`Batch::due_textures`])
+    /// on the helper threads (`crate::shadow::wide_run`, the submitting
+    /// thread among them), all done before it returns. Each check takes
+    /// its texture's own lock, the journal's for its asking, the runtime's
+    /// mapping lock for reading (shared), and a buffer of its thread's own;
+    /// the hashing and detiling run side by side. "textures N ms" counts
+    /// the time it took, not the threads' sum.
+    fn check_textures(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.due_textures.is_empty() {
+            return;
+        }
+        let due = std::mem::take(&mut self.due_textures);
+        PARALLEL_CHECKS[0].fetch_add(1, Relaxed);
+        PARALLEL_CHECKS[1].fetch_add(due.len() as u64, Relaxed);
+        if due.len() < 2 {
+            for staging in due {
+                staging.refresh();
+            }
+            return;
+        }
+        let started = std::time::Instant::now();
+        let before = PREPARING[2].load(Relaxed);
+        let jobs: Vec<Box<dyn FnOnce() + Send>> = due
+            .into_iter()
+            .map(|staging| Box::new(move || staging.refresh()) as Box<dyn FnOnce() + Send>)
+            .collect();
+        crate::shadow::wide_run(jobs);
+        let summed = PREPARING[2].load(Relaxed).saturating_sub(before);
+        let wall = started.elapsed().as_micros() as u64;
+        PREPARING[2].fetch_sub(summed.saturating_sub(wall), Relaxed);
+        PARALLEL_CHECKS[2].fetch_add(summed, Relaxed);
+        PARALLEL_CHECKS[3].fetch_add(wall, Relaxed);
+        let batches = PARALLEL_CHECKS[0].load(Relaxed);
+        if batches.is_multiple_of(1 << 14) {
+            let [b, n, sum, w] = [0, 1, 2, 3].map(|i| PARALLEL_CHECKS[i].load(Relaxed));
+            tracing::info!(
+                "texture checks side by side (VICTORY_PARALLEL_REFRESH) so far: {b} batches, {n} textures; the threads' sum {} ms, the time taken {} ms",
+                sum / 1000,
+                w / 1000
+            );
+        }
+    }
+
     fn flush(&mut self) {
+        self.check_textures();
         self.index.clear();
         // One write-watch asking for the copies that lie close together,
         // not one per copy.
@@ -7568,6 +7626,52 @@ impl Batch {
         }
     }
 }
+
+/// Whether a submission's texture checks (`crate::texture::Staging::refresh`:
+/// the write watch or guards asked, then the memory hashed and detiled if
+/// it may have changed) are gathered between writes of ours and run on the
+/// helper threads side by side (`VICTORY_PARALLEL_REFRESH=1`; off by
+/// default: one after the other where each texture's step stands; `alt`:
+/// twenty seconds with, twenty without, in turn, each change said in the
+/// log). Pair with `VICTORY_WIDE_REFRESH` for the host copies of buffers.
+///
+/// Why: "textures N ms" is 11-12 ms of a boat frame's preparing (runs
+/// 319-321, 28-30 MB hashed a frame), all on the submitting thread. The
+/// checks touch different textures; what they share is the journal's lock
+/// for the asking (short for write-watched memory, a guard walk for view
+/// memory), so the hashing and detiling are what goes side by side.
+///
+/// What changes: a texture's check moves from its step to the next write
+/// of ours or flush, so it reads title memory a little later in the
+/// preparing, and never after a write of ours that its lists come before.
+fn parallel_refresh() -> bool {
+    /// 0 off, 1 on, 2 in turn.
+    static MODE: OnceLock<u8> = OnceLock::new();
+    match *MODE.get_or_init(|| match std::env::var("VICTORY_PARALLEL_REFRESH").as_deref() {
+        Ok("1") => 1,
+        Ok("alt") => 2,
+        _ => 0,
+    }) {
+        0 => false,
+        1 => true,
+        _ => {
+            static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
+            let on = (EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs() / 20) % 2 == 1;
+            static LAST: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+            if LAST.swap(u8::from(on), Ordering::Relaxed) != u8::from(on) {
+                tracing::info!(
+                    "a submission's texture checks run side by side from now (VICTORY_PARALLEL_REFRESH=alt): {}",
+                    if on { "ON" } else { "off, one after the other as usual" }
+                );
+            }
+            on
+        }
+    }
+}
+
+/// Since the start, of [`Batch::check_textures`]: batches, textures, the
+/// threads' summed microseconds, the microseconds taken.
+static PARALLEL_CHECKS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
 /// Copies title memory at submission. The ranges were checked against their
 /// resources when recorded, but the title may since have unmapped pages of
