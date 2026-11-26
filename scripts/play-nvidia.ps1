@@ -46,6 +46,17 @@ $settings = @{
     # d4a528b, fork pull request #1007: 6.2-6.7 -> 8.6-9.5 fps there). Needs late wait, which
     # VICTORY_RELAY above turns on.
     VICTORY_HEAP_WORKER = '1'
+    # Flights get more room before they are settled (host.rs; fxceless 06702fe: the preparing
+    # thread waits for the card 4.6 ms a frame instead of 17.7 there).
+    VICTORY_SETTLE_ROOM = '1'
+    # A submission's texture checks run side by side on the helper threads (host.rs; fxceless
+    # ceb9e1f: -8.7 / -9.4 ms of the preparing thread's work a frame there).
+    VICTORY_PARALLEL_REFRESH = '1'
+    # The ocean's height and displacement maps go back to title memory: the title's CPU reads
+    # them (boats float on them). Without it the water is wrong and boats sink (texback.rs).
+    VICTORY_TEXTURE_BACK = '1'
+    # Crash tracing cheap enough to leave on: the faulting address of a removed device.
+    VICTORY_D3D12_DRED = 'faults'
 }
 $SeriesS = -not $SeriesX
 if ($SeriesS) {
