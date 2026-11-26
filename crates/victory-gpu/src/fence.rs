@@ -104,10 +104,36 @@ extern "system" fn set_event_on_completion(this: This, value: u64, event: *mut c
         if crate::host::late() {
             drop(waiters);
             crate::host::settle_for_fence();
+            // Not reached yet: wait up to a quarter of a second for another
+            // thread's signal ([`set`] wakes the address), letting held
+            // queue work run between waits (cool_fox e05d463, codec_d).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+            loop {
+                let current = fence.value.load(Ordering::Acquire);
+                if current >= value {
+                    return S_OK;
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let ms = (deadline - now).as_millis().min(10) as u32;
+                // SAFETY: waits on the fence's own u64 until woken by
+                // `WakeByAddressAll` or the timeout; `current` outlives it.
+                unsafe {
+                    windows_sys::Win32::System::Threading::WaitOnAddress(
+                        (&raw const fence.value).cast(),
+                        (&raw const current).cast(),
+                        size_of::<u64>(),
+                        ms.max(1),
+                    );
+                }
+                crate::queue::release_held(false);
+            }
             if fence.value.load(Ordering::Acquire) >= value {
                 return S_OK;
             }
-            tracing::warn!(value, "blocking fence wait not implemented");
+            tracing::warn!(value, "blocking fence wait timed out");
             return E_NOTIMPL;
         }
         // shortcut: a null event means "block until reached"; nothing can
@@ -132,6 +158,13 @@ pub(crate) fn set(this: This, value: u64) {
         }
         !reached
     });
+    drop(waiters);
+    // Wakes a thread blocked on the value in `set_event_on_completion`.
+    #[cfg(windows)]
+    // SAFETY: wakes waiters on the fence's own u64; no memory is touched.
+    unsafe {
+        windows_sys::Win32::System::Threading::WakeByAddressAll((&raw const fence.value).cast());
+    }
 }
 pub(crate) extern "system" fn signal(this: This, value: u64) -> HRESULT {
     set(this, value);
