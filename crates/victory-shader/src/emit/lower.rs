@@ -4299,98 +4299,10 @@ impl<'a> Lower<'a> {
         r
     }
 
-    /// Whether a quad-local read takes its lane with the host's quad
-    /// operations: in a pixel program always. Lanes of a quad the primitive
-    /// does not cover, or that were discarded, are helpers on the host;
-    /// wave reads leave those out (AMD gives 0 from them), quad reads are
-    /// what reaches them.
-    fn helpers_read(&self, quad: bool) -> bool {
-        quad && self.s.pixel
-    }
-
-    /// `x` of the lane of this lane's quad that `lanes` names for each of
-    /// the quad's four, by the host's quad operations.
-    fn quad_read(&mut self, x: V, lanes: [u8; 4]) -> V {
-        self.s.flags |= flags::WAVE_OPS;
-        let c = self.cur;
-        let i32t = self.s.t.i32;
-        if lanes == [0, 1, 2, 3] {
-            return x;
-        }
-        // One lane for all.
-        if lanes.iter().all(|&l| l == lanes[0]) {
-            let n = self.s.m.i32(lanes[0].into());
-            return self.s.op(
-                c,
-                "quadReadLaneAt.i32",
-                Attr::NoUnwind,
-                i32t,
-                122,
-                &[x, n],
-            );
-        }
-        // Else each lane's own, its neighbour across in x (1) or y (2), or
-        // the diagonal one (3).
-        let across = |i: usize| i as u8 ^ lanes[i];
-        let mut r = None;
-        for by in 0..4u8 {
-            if !(0..4).any(|i| across(i) == by) {
-                continue;
-            }
-            let read = if by == 0 {
-                x
-            } else {
-                // QuadReadAcrossX, Y, Diagonal.
-                let kind = self.s.m.i8(by - 1);
-                self.s
-                    .op(c, "quadOp.i32", Attr::NoUnwind, i32t, 123, &[x, kind])
-            };
-            r = Some(match r {
-                None => read,
-                Some(r) => {
-                    let mut here = self.s.m.bool(false);
-                    let lane = self.lane_index();
-                    let three = self.s.m.i32(3);
-                    let at = self.s.m.bin(c, Bin::And, lane, three);
-                    for i in (0..4).filter(|&i| across(i) == by) {
-                        let k = self.s.m.i32(i as u32);
-                        let is = self.s.m.cmp(c, pred::EQ, at, k);
-                        here = self.s.m.bin(c, Bin::Or, here, is);
-                    }
-                    self.s.m.select(c, here, read, r)
-                }
-            });
-        }
-        r.unwrap_or(x)
-    }
-
     /// `x` in the first lane of this host wave where `guard` holds, and whether it has such a
     /// lane: the console reads the first lane of EXEC, and a lane that got here with EXEC clear
     /// (a guard, not a branch) is not one. With none, `x` of the wave's first lane here.
-    ///
-    /// A helper lane of a pixel shader takes its own value: the console's whole-quad mode has
-    /// helper lanes in EXEC, so a waterfall loop serves them too, and the host's wave operations
-    /// leave them out. Once only helper lanes are left in such a loop none of them ever matched:
-    /// they ran to the iteration limit, and left with no sample for their quad's derivatives,
-    /// along every triangle's edges (upstream #908, the fix of #1733 for this tree's form).
     fn first_lane(&mut self, x: V, guard: Option<V>) -> (V, V) {
-        let (first, any) = self.first_live_lane(x, guard);
-        if !self.s.pixel || !super::helper_own() {
-            return (first, any);
-        }
-        let helper = self.helper_lane();
-        let c = self.cur;
-        let yes = self.s.m.bool(true);
-        (self.s.m.select(c, helper, x, first), self.s.m.select(c, helper, yes, any))
-    }
-
-    /// Whether this lane of a pixel shader is a helper lane.
-    fn helper_lane(&mut self) -> V {
-        let i1t = self.s.t.i1;
-        self.s.op(self.cur, "isHelperLane.i1", Attr::ReadOnly, i1t, 221, &[])
-    }
-
-    fn first_live_lane(&mut self, x: V, guard: Option<V>) -> (V, V) {
         let c = self.cur;
         let i32t = self.s.t.i32;
         self.s.flags |= flags::WAVE_OPS;
@@ -4509,13 +4421,6 @@ impl<'a> Lower<'a> {
             };
             let r = if mesh_quad {
                 self.quad_pick(x, src)
-            } else if self.helpers_read(quad) {
-                let lanes = if offset & 0x8000 != 0 {
-                    [0, 1, 2, 3].map(|i| (offset >> (2 * i) & 3) as u8)
-                } else {
-                    [0, 1, 2, 3].map(|i| ((i & offset | offset >> 5 & 3) ^ offset >> 10 & 3) as u8 & 3)
-                };
-                self.quad_read(x, lanes)
             } else {
                 self.read_lane(x, src)
             };
@@ -6156,13 +6061,7 @@ impl<'a> Lower<'a> {
             if per_lane {
                 self.s.flags |= flags::WAVE_OPS;
                 let i32t = self.s.t.i32;
-                let first = self.s.op(c, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[d]);
-                d = if self.s.pixel && super::helper_own() {
-                    let helper = self.helper_lane();
-                    self.s.m.select(c, helper, d, first)
-                } else {
-                    first
-                };
+                d = self.s.op(c, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[d]);
             }
             addr = self.s.m.bin(c, Bin::Add, addr, d);
         }
@@ -7053,10 +6952,6 @@ impl<'a> Lower<'a> {
         };
         let mut r = if mesh_quad {
             self.quad_pick(x, src)
-        } else if let Dpp::Row { ctrl, .. } = dpp
-            && self.helpers_read(quad)
-        {
-            self.quad_read(x, [0, 1, 2, 3].map(|i| (ctrl >> (2 * i) & 3) as u8))
         } else {
             self.read_lane(x, src)
         };
