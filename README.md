@@ -6,7 +6,7 @@ files the user supplies. This build is a fork of
 fixes taken over one at a time from
 [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) and
 [trustno1-coder/VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA).
-The goal is speed on an NVIDIA card without losing the lighting.
+The goal is speed on an NVIDIA card without losing the graphics quality and getting at least 15-20 fps.
 
 **This repository contains no game files, code or assets.** You need your own
 copy of the game. It is not affiliated with or endorsed by the game's developer
